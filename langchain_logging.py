@@ -1,6 +1,5 @@
-
 # Install required libraries if not already installed
-# !pip install langchain openai azure-identity pandas numpy
+# !pip install langchain azure-identity requests pandas numpy
 
 # Import necessary libraries
 import os
@@ -13,28 +12,21 @@ import asyncio
 
 # Import Azure and LangChain libraries
 from azure.identity import DefaultAzureCredential
-import openai
-from langchain.llms import AzureOpenAI
-from langchain.embeddings import OpenAIEmbeddings
+from azure.identity import AzureKeyCredential
+import requests
+from langchain.llms.base import LLM
 from langchain.agents import initialize_agent, AgentType
 from langchain import PromptTemplate, LLMChain
 from langchain.memory import ConversationBufferMemory
 from langchain.tools import BaseTool
 
-# Set up OpenAI API to use Azure OpenAI Service
-openai.api_type = "azure"
-openai.api_version = "2023-05-15"  # Use the appropriate API version
-openai.api_base = "https://<your-resource-name>.openai.azure.com/"  # Replace with your endpoint
-openai.api_key = "<your-api-key>"  # Replace with your API key
-
 
 
 class LogFilterTool(BaseTool):
-    name = "Time-Based Log Filter"
-    description = "Filters log entries based on a specified time frame."
-
-    def __init__(self, log_file_path: str):
-        self.log_file_path = log_file_path
+    name: str = "Time-Based Log Filter"
+    description: str = "Filters log entries based on a specified time frame."
+    
+    log_file_path: str  # Declare as a field with a type annotation
 
     def _run(self, start_time: Optional[str] = None, end_time: Optional[str] = None) -> List[str]:
         start_datetime, end_datetime = self.get_time_frame(start_time, end_time)
@@ -69,21 +61,26 @@ class LogFilterTool(BaseTool):
                         filtered_logs.append(line)
                 else:
                     if filtered_logs:
-                        filtered_logs[-1] += line
+                        filtered_logs[-1] += line  # Append to the previous entry
         return filtered_logs
 
 
-# Define the path to your log file
+
+
+
+    # Define the path to your log file
 log_file_path = 'system_log.txt'  # Replace with your actual log file path
 
-# Initialize the tool
+# Initialize the tool with the log_file_path as a keyword argument
 log_filter_tool = LogFilterTool(log_file_path=log_file_path)
 
 
 
+
+
 class LogChunkerTool(BaseTool):
-    name = "Log Chunker"
-    description = "Chunks log entries into manageable sizes for processing."
+    name: str = "Log Chunker"
+    description: str = "Chunks log entries into manageable sizes for processing."
 
     def _run(self, log_entries: List[str], chunk_size: int = 1000) -> List[List[str]]:
         chunks = self.chunk_logs(log_entries, chunk_size)
@@ -103,24 +100,65 @@ log_chunker_tool = LogChunkerTool()
 
 
 
+
+class AzureOpenAILLM(LLM):
+    def __init__(self, endpoint: str, api_key: str, deployment_name: str):
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self.deployment_name = deployment_name
+        self.api_version = '2023-05-15'  # Update to the correct API version if needed
+
+    @property
+    def _llm_type(self) -> str:
+        return "azure-openai"
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None, temperature: float = 0.5, max_tokens: int = 150) -> str:
+        headers = {
+            "Content-Type": "application/json",
+            "api-key": self.api_key,
+        }
+        url = f"{self.endpoint}/openai/deployments/{self.deployment_name}/completions?api-version={self.api_version}"
+
+        data = {
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "n": 1,
+            "stop": stop,
+        }
+
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code != 200:
+            raise Exception(f"Request failed with status {response.status_code}: {response.text}")
+        completion = response.json()
+        return completion['choices'][0]['text'].strip()
+
+
+
+
+
+
+
 # Configure the Azure OpenAI LLM
-llm = AzureOpenAI(
-    deployment_name="<your-deployment-name>",  # Replace with your deployment name
-    model_name="gpt-35-turbo",  # Replace with your model name if different
-    openai_api_key=openai.api_key,
-    openai_api_base=openai.api_base,
-    openai_api_version=openai.api_version,
-    openai_api_type=openai.api_type
+# Replace the placeholders with your actual Azure OpenAI details
+azure_endpoint = "https://<your-resource-name>.openai.azure.com"  # Your Azure OpenAI endpoint
+azure_api_key = "<your-api-key>"  # Your Azure OpenAI API key
+deployment_name = "<your-deployment-name>"  # Your model deployment name
+
+llm = AzureOpenAILLM(
+    endpoint=azure_endpoint,
+    api_key=azure_api_key,
+    deployment_name=deployment_name
 )
 
 
 
-class LogSummarizerTool(BaseTool):
-    name = "Log Summarizer"
-    description = "Summarizes chunks of log entries."
 
-    def __init__(self, llm):
-        self.llm = llm
+class LogSummarizerTool(BaseTool):
+    name: str = "Log Summarizer"
+    description: str = "Summarizes chunks of log entries."
+
+    llm: AzureOpenAILLM  # Use the custom LLM class
 
     def _run(self, chunks: List[List[str]]) -> List[str]:
         summaries = []
@@ -135,9 +173,12 @@ class LogSummarizerTool(BaseTool):
 
     def summarize_chunk(self, chunk: List[str]) -> str:
         chunk_text = ''.join(chunk)
-        prompt = f"Summarize the following log entries, highlighting any errors, warnings, and unusual activities:\n\n{chunk_text}\n\nSummary:"
+        prompt = (
+            "Summarize the following log entries, highlighting any errors, warnings, and unusual activities:\n\n"
+            f"{chunk_text}\n\nSummary:"
+        )
         try:
-            response = self.llm(prompt)
+            response = self.llm._call(prompt)
             return response.strip()
         except Exception as e:
             print(f"Error during summarization: {e}")
@@ -145,7 +186,12 @@ class LogSummarizerTool(BaseTool):
 
 
 
+
+
 log_summarizer_tool = LogSummarizerTool(llm=llm)
+
+
+
 
 
 
@@ -156,6 +202,8 @@ tools = [
     log_summarizer_tool,
     # You can add more tools as needed
 ]
+
+
 
 
 
@@ -170,6 +218,8 @@ agent_chain = initialize_agent(
     verbose=True,
     memory=memory
 )
+
+
 
 
 
@@ -189,27 +239,6 @@ def process_user_request(agent_chain, start_time: Optional[str] = None, end_time
 
     # Step 4: Present summaries or further process as needed
     return summaries
-
-
-
-
-
-# User selects date (or defaults to last 24 hours)
-user_start_time = None  # e.g., '2023-10-08 00:00:00'
-user_end_time = None    # e.g., '2023-10-09 00:00:00'
-user_chunk_size = 500   # Adjust as needed
-
-# Process the request
-summaries = process_user_request(
-    agent_chain=agent_chain,
-    start_time=user_start_time,
-    end_time=user_end_time,
-    chunk_size=user_chunk_size
-)
-
-# Display summaries
-for idx, summary in enumerate(summaries):
-    print(f"Summary for Chunk {idx + 1}:\n{summary}\n{'-'*80}\n")
 
 
 
